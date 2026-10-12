@@ -14,18 +14,19 @@
   ],
   "scripts": {
     "build": "tsc && chmod +x build/index.js",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test tests/*.test.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.4.0"
+    "@modelcontextprotocol/sdk": "^1.32.1"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^5.0.0"
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/burtthecoder/mcp-dnstwist.git"
+    "url": "git+https://github.com/w0h1v/mcp-dnstwist.git"
   },
   "keywords": [
     "mcp",
@@ -41,6 +42,6 @@
   "author": "burtmacklin",
   "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   }
 }

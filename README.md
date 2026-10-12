@@ -38,7 +38,7 @@ npx -y @smithery/cli install @burtthecoder/mcp-dnstwist --client claude
 
 2. Install the server globally via npm:
 ```bash
-npm install -g mcp-dnstwist
+npm install -g @burtthecoder/mcp-dnstwist
 ```
 
 3. Add to your Claude Desktop configuration file:
