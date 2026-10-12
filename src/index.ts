@@ -7,10 +7,13 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { validateFuzzArgs } from './validate.js';
 
-const execAsync = promisify(exec);
+// execFile runs docker directly with an argument array. No shell is involved,
+// so tool input can never be interpreted as shell syntax (CWE-78, issue #13).
+const execFileAsync = promisify(execFile);
 const DOCKER_IMAGE = 'elceef/dnstwist';
 
 interface DnstwistResult {
@@ -25,41 +28,14 @@ interface DnstwistResult {
   whois_registrar?: string;
 }
 
-interface FuzzDomainArgs {
-  domain: string;
-  nameservers?: string;
-  threads?: number;
-  format?: 'json' | 'csv' | 'list';
-  registered_only?: boolean;
-  mxcheck?: boolean;
-  ssdeep?: boolean;
-  banners?: boolean;
-}
-
-function isFuzzDomainArgs(args: unknown): args is FuzzDomainArgs {
-  if (!args || typeof args !== 'object') return false;
-  const a = args as Record<string, unknown>;
-  return typeof a.domain === 'string' &&
-    (a.nameservers === undefined || typeof a.nameservers === 'string') &&
-    (a.threads === undefined || typeof a.threads === 'number') &&
-    (a.format === undefined || ['json', 'csv', 'list'].includes(a.format as string)) &&
-    (a.registered_only === undefined || typeof a.registered_only === 'boolean') &&
-    (a.mxcheck === undefined || typeof a.mxcheck === 'boolean') &&
-    (a.ssdeep === undefined || typeof a.ssdeep === 'boolean') &&
-    (a.banners === undefined || typeof a.banners === 'boolean');
-}
-
 class DnstwistServer {
   private server: Server;
 
   constructor() {
-    this.server = new Server({
-      name: 'dnstwist-server',
-      version: '0.1.0',
-      capabilities: {
-        tools: {}
-      }
-    });
+    this.server = new Server(
+      { name: 'dnstwist-server', version: '0.1.0' },
+      { capabilities: { tools: {} } }
+    );
     
     this.setupToolHandlers();
     
@@ -76,10 +52,10 @@ class DnstwistServer {
     });
   }
 
-  private async execCommand(command: string): Promise<{ stdout: string; stderr: string }> {
-    console.error('Executing command:', command);
+  private async execCommand(file: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+    console.error('Executing:', file, JSON.stringify(args));
     try {
-      const result = await execAsync(command, {
+      const result = await execFileAsync(file, args, {
         maxBuffer: 10 * 1024 * 1024
       });
       console.error('Command output:', result.stdout);
@@ -95,18 +71,18 @@ class DnstwistServer {
     try {
       console.error('Checking Docker...');
       try {
-        await this.execCommand('docker --version');
+        await this.execCommand('docker', ['--version']);
       } catch (error) {
         throw new Error('Docker is not installed or not running. Please install Docker and try again.');
       }
 
       console.error('Checking if dnstwist image exists...');
       try {
-        await this.execCommand(`docker image inspect ${DOCKER_IMAGE}`);
+        await this.execCommand('docker', ['image', 'inspect', DOCKER_IMAGE]);
         console.error('Dnstwist image found');
       } catch (error) {
         console.error('Dnstwist image not found, pulling...');
-        await this.execCommand(`docker pull ${DOCKER_IMAGE}`);
+        await this.execCommand('docker', ['pull', DOCKER_IMAGE]);
         console.error('Dnstwist image pulled successfully');
       }
     } catch (error) {
@@ -184,23 +160,16 @@ class DnstwistServer {
           );
         }
 
-        if (!isFuzzDomainArgs(request.params.arguments)) {
-          throw new McpError(
-            ErrorCode.InvalidParams,
-            'Invalid arguments for fuzz_domain'
-          );
-        }
-
         const {
           domain,
-          nameservers = '1.1.1.1',
-          threads = 50,
-          format = 'json',
-          registered_only = true,
-          mxcheck = true,
-          ssdeep = false,
-          banners = true
-        } = request.params.arguments;
+          nameservers,
+          threads,
+          format,
+          registered_only,
+          mxcheck,
+          ssdeep,
+          banners
+        } = validateFuzzArgs(request.params.arguments);
 
         // Build command arguments
         const args = [
@@ -216,9 +185,14 @@ class DnstwistServer {
         if (banners) args.push('-b');
 
         // Run dnstwist in Docker
-        const { stdout, stderr } = await this.execCommand(
-          `docker run --rm ${DOCKER_IMAGE} ${args.join(' ')}`
+        const { stdout } = await this.execCommand(
+          'docker', ['run', '--rm', DOCKER_IMAGE, ...args]
         );
+
+        // csv and list output are returned as dnstwist printed them.
+        if (format !== 'json') {
+          return { content: [{ type: 'text', text: stdout }] };
+        }
 
         let results: DnstwistResult[];
         try {
