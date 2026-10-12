@@ -8,8 +8,8 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { execFile } from 'child_process';
-import { isIP } from 'net';
 import { promisify } from 'util';
+import { validateFuzzArgs } from './validate.js';
 
 // execFile runs docker directly with an argument array. No shell is involved,
 // so tool input can never be interpreted as shell syntax (CWE-78, issue #13).
@@ -26,72 +26,6 @@ interface DnstwistResult {
   fuzzer: string;
   whois_created?: string;
   whois_registrar?: string;
-}
-
-interface FuzzDomainArgs {
-  domain: string;
-  nameservers?: string;
-  threads?: number;
-  format?: 'json' | 'csv' | 'list';
-  registered_only?: boolean;
-  mxcheck?: boolean;
-  ssdeep?: boolean;
-  banners?: boolean;
-}
-
-// A hostname: dot-separated labels of letters, digits and inner hyphens, ending
-// in an alphabetic or punycode TLD. It can't start with "-", so it can't be
-// mistaken for a dnstwist option either.
-const HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/i;
-const FORMATS = ['json', 'csv', 'list'] as const;
-const MAX_NAMESERVERS = 10;
-
-function invalid(message: string): never {
-  throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for fuzz_domain: ${message}`);
-}
-
-function optionalBoolean(a: Record<string, unknown>, key: string, fallback: boolean): boolean {
-  if (a[key] === undefined) return fallback;
-  if (typeof a[key] !== 'boolean') invalid(`${key} must be a boolean`);
-  return a[key] as boolean;
-}
-
-export function validateFuzzArgs(args: unknown): Required<FuzzDomainArgs> {
-  if (!args || typeof args !== 'object') invalid('arguments must be an object');
-  const a = args as Record<string, unknown>;
-
-  if (typeof a.domain !== 'string' || !HOSTNAME.test(a.domain)) {
-    invalid('domain must be a domain name such as example.com');
-  }
-
-  const nameservers = a.nameservers === undefined ? '1.1.1.1' : a.nameservers;
-  if (typeof nameservers !== 'string') invalid('nameservers must be a string');
-  const servers = (nameservers as string).split(',');
-  if (servers.length > MAX_NAMESERVERS ||
-      !servers.every((ns) => isIP(ns) !== 0 || HOSTNAME.test(ns))) {
-    invalid(`nameservers must be up to ${MAX_NAMESERVERS} comma-separated IP addresses or hostnames`);
-  }
-
-  const threads = a.threads === undefined ? 50 : a.threads;
-  if (typeof threads !== 'number' || !Number.isInteger(threads) || threads < 1 || threads > 100) {
-    invalid('threads must be an integer from 1 to 100');
-  }
-
-  const format = a.format === undefined ? 'json' : a.format;
-  if (!FORMATS.includes(format as typeof FORMATS[number])) {
-    invalid(`format must be one of ${FORMATS.join(', ')}`);
-  }
-
-  return {
-    domain: a.domain as string,
-    nameservers: nameservers as string,
-    threads: threads as number,
-    format: format as (typeof FORMATS)[number],
-    registered_only: optionalBoolean(a, 'registered_only', true),
-    mxcheck: optionalBoolean(a, 'mxcheck', true),
-    ssdeep: optionalBoolean(a, 'ssdeep', false),
-    banners: optionalBoolean(a, 'banners', true),
-  };
 }
 
 class DnstwistServer {

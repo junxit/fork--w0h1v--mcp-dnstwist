@@ -2,13 +2,14 @@
 // prove tool input can never reach a shell (CWE-78, issue #13).
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, chmodSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
+const srcDir = fileURLToPath(new URL('../src/', import.meta.url));
 const dir = mkdtempSync(join(tmpdir(), 'dnstwist-test-'));
 const log = join(dir, 'docker-calls.jsonl');
 const marker = (name) => join(dir, `pwned-${name}`);
@@ -18,7 +19,7 @@ const marker = (name) => join(dir, `pwned-${name}`);
 const fakeDocker = join(dir, 'docker');
 writeFileSync(fakeDocker, `#!${process.execPath}
 const fs = require('fs');
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n');
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2) }) + '\\n');
 if (process.argv[2] === 'run') process.stdout.write('[]');
 `);
 chmodSync(fakeDocker, 0o755);
@@ -46,7 +47,7 @@ after(async () => {
 function runCalls() {
   if (!existsSync(log)) return [];
   return readFileSync(log, 'utf8').trim().split('\n').filter(Boolean)
-    .map((line) => JSON.parse(line)).filter((argv) => argv[0] === 'run');
+    .map((line) => JSON.parse(line)).filter((call) => call.argv[0] === 'run');
 }
 
 const call = (args) => client.callTool({ name: 'fuzz_domain', arguments: args });
@@ -86,7 +87,7 @@ test('threads must be an integer from 1 to 100', async () => {
 test('valid input reaches docker as a separate argv, unchanged', async () => {
   const result = await call({ domain: 'example.com', nameservers: '1.1.1.1,8.8.8.8', threads: 10 });
   assert.notEqual(result.isError, true, JSON.stringify(result.content));
-  assert.deepEqual(runCalls().at(-1), [
+  assert.deepEqual(runCalls().at(-1).argv, [
     'run', '--rm', 'elceef/dnstwist', 'example.com',
     '--format', 'json', '--registered', '--nameservers', '1.1.1.1,8.8.8.8',
     '-t', '10', '--mxcheck', '-b',
@@ -96,7 +97,7 @@ test('valid input reaches docker as a separate argv, unchanged', async () => {
 test('hostname and IPv6 nameservers are accepted', async () => {
   const result = await call({ domain: 'example.co.uk', nameservers: 'dns.google,2606:4700:4700::1111' });
   assert.notEqual(result.isError, true, JSON.stringify(result.content));
-  assert.deepEqual(runCalls().at(-1).slice(3, 9),
+  assert.deepEqual(runCalls().at(-1).argv.slice(3, 9),
     ['example.co.uk', '--format', 'json', '--registered', '--nameservers', 'dns.google,2606:4700:4700::1111']);
 });
 
@@ -104,5 +105,17 @@ test('csv and list formats return dnstwist output as text instead of failing', a
   const result = await call({ domain: 'example.com', format: 'csv' });
   assert.notEqual(result.isError, true, JSON.stringify(result.content));
   assert.equal(result.content[0].text, '[]');
-  assert.equal(runCalls().at(-1)[5], 'csv');
+  assert.equal(runCalls().at(-1).argv[5], 'csv');
+});
+
+// Validation already rejects everything a shell would treat specially, so a
+// switch back to exec() would not change behaviour for valid input; `sh -c`
+// even execs a single simple command directly. Guard the source instead.
+test('source never runs commands through a shell', () => {
+  const src = readdirSync(srcDir).filter((f) => f.endsWith('.ts'))
+    .map((f) => readFileSync(join(srcDir, f), 'utf8')).join('\n');
+  // \bexec\b matches exec and exec() but not execFile.
+  assert.doesNotMatch(src, /\b(exec|execSync|spawnSync)\b/, 'use execFile with an argument array');
+  assert.doesNotMatch(src, /shell\s*:\s*true/);
+  assert.match(src, /execFile/);
 });
