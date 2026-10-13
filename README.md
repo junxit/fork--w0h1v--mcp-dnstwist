@@ -17,7 +17,7 @@ This tool is designed for legitimate security research purposes. Please:
 
 ## Requirements
 
-- Node.js (v20 or later)
+- Node.js (v20.3 or later)
 - Docker
 - macOS, Linux, or Windows with Docker Desktop installed
 

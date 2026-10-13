@@ -19,8 +19,24 @@ writeFileSync(fakeDocker, `#!${process.execPath}
 const fs = require('fs');
 const argv = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv }) + '\\n');
-if (argv[0] === 'run' && argv.includes('slow.example.com')) setTimeout(() => {}, 60000);
-else if (argv[0] === 'run') process.stdout.write('[]');
+if (argv[0] === 'run' && (argv.includes('slow.example.com') || argv.includes('late.example.com'))) {
+  setTimeout(() => {}, 60000);
+} else if (argv[0] === 'run' && argv.includes('fail.example.com')) {
+  process.stderr.write('dnstwist: error');
+  process.exit(2);
+} else if (argv[0] === 'run') {
+  process.stdout.write('[]');
+} else if (argv[0] === 'rm') {
+  // Containers of late.example.com scans only "exist" from the third rm on,
+  // like a container the daemon hadn't finished creating yet.
+  const runs = fs.readFileSync(${JSON.stringify(log)}, 'utf8').trim().split('\\n').map((l) => JSON.parse(l).argv);
+  const run = runs.find((a) => a[0] === 'run' && a.includes(argv[2]));
+  const attempts = runs.filter((a) => a[0] === 'rm' && a[2] === argv[2]).length;
+  if (run && run.includes('late.example.com') && attempts < 3) {
+    process.stderr.write('Error response from daemon: No such container: ' + argv[2]);
+    process.exit(1);
+  }
+}
 `);
 chmodSync(fakeDocker, 0o755);
 
@@ -46,6 +62,7 @@ after(async () => {
 const calls = () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [])
   .filter(Boolean).map((line) => JSON.parse(line).argv);
 const containerOf = (runArgv) => runArgv[runArgv.indexOf('--name') + 1];
+const rmAttempts = (name) => calls().filter((a) => a[0] === 'rm' && a[2] === name).length;
 
 async function removed(name) {
   // Cleanup runs right after the error is returned; give it a moment.
@@ -89,4 +106,21 @@ test('fast scans are unaffected and leave nothing to clean up', async () => {
   assert.notEqual(result.isError, true, JSON.stringify(result.content));
   const run = calls().filter((a) => a[0] === 'run' && a.includes('example.com')).at(-1);
   assert.ok(!calls().some((a) => a[0] === 'rm' && a[2] === containerOf(run)));
+});
+
+test('removal is retried while the container may still be being created', async () => {
+  const result = await client.callTool({ name: 'fuzz_domain', arguments: { domain: 'late.example.com' } });
+  assert.equal(result.isError, true);
+  const run = calls().filter((a) => a[0] === 'run' && a.includes('late.example.com')).at(-1);
+  for (let i = 0; i < 100 && rmAttempts(containerOf(run)) < 3; i++) await new Promise((r) => setTimeout(r, 100));
+  assert.equal(rmAttempts(containerOf(run)), 3, 'two failed attempts, then a successful one');
+});
+
+test('a scan that fails on its own returns promptly without removal retries', async () => {
+  const started = Date.now();
+  const result = await client.callTool({ name: 'fuzz_domain', arguments: { domain: 'fail.example.com' } });
+  assert.equal(result.isError, true);
+  assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
+  const run = calls().filter((a) => a[0] === 'run' && a.includes('fail.example.com')).at(-1);
+  assert.equal(rmAttempts(containerOf(run)), 0);
 });

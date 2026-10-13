@@ -42,6 +42,6 @@
   "author": "burtmacklin",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.3"
   }
 }

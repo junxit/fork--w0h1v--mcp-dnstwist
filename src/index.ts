@@ -60,8 +60,10 @@ class DnstwistServer {
     this.server.onerror = (error) => console.error('[MCP Error]', error);
     for (const signal of ['SIGINT', 'SIGTERM'] as const) {
       process.on(signal, async () => {
-        // Don't leave scans running after the server is gone.
-        await Promise.all([...this.runningContainers].map((name) => this.removeContainer(name)));
+        // Don't leave scans running after the server is gone: stop each
+        // in-flight docker run first, then remove its container.
+        for (const controller of this.runningContainers.values()) controller.abort();
+        await Promise.all([...this.runningContainers.keys()].map((name) => this.removeContainer(name)));
         await this.server.close();
         process.exit(0);
       });
@@ -94,18 +96,23 @@ class DnstwistServer {
     }
   }
 
-  // Containers of scans in progress, removed if the server shuts down.
-  private runningContainers = new Set<string>();
+  // Scans in progress: container name -> controller that stops its docker run.
+  private runningContainers = new Map<string, AbortController>();
 
   // Killing the docker CLI doesn't stop the container it started, so a scan
-  // that times out or is cancelled is removed by name. Best effort: the
-  // container may already be gone.
-  private async removeContainer(name: string): Promise<void> {
-    try {
-      await execFileAsync('docker', ['rm', '-f', name]);
-    } catch {
-      // Nothing to remove.
+  // that times out or is cancelled is removed by name. Right after the CLI
+  // starts, the daemon may not have created the container yet ("No such
+  // container"), so keep trying for a few seconds until a removal succeeds.
+  private async removeContainer(name: string, attempts = 10, delayMs = 500): Promise<void> {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        await execFileAsync('docker', ['rm', '-f', name]);
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
     }
+    console.error(`Could not confirm removal of container ${name}`);
   }
 
   private async ensureSetup(): Promise<void> {
@@ -227,16 +234,19 @@ class DnstwistServer {
 
         // Run dnstwist in Docker
         const container = `mcp-dnstwist-${randomUUID()}`;
-        this.runningContainers.add(container);
+        const stop = new AbortController();
+        this.runningContainers.set(container, stop);
         let stdout: string;
         try {
           ({ stdout } = await this.execCommand(
             'docker', ['run', '--rm', '--name', container, DOCKER_IMAGE, ...args],
-            { timeout: TIMEOUT_SECONDS * 1000, signal: extra.signal }
+            { timeout: TIMEOUT_SECONDS * 1000, signal: AbortSignal.any([extra.signal, stop.signal]) }
           ));
         } catch (error) {
-          await this.removeContainer(container);
-          const timedOut = (error as { killed?: boolean }).killed && !extra.signal.aborted;
+          const stopped = extra.signal.aborted || stop.signal.aborted;
+          const timedOut = Boolean((error as { killed?: boolean }).killed) && !stopped;
+          // If dnstwist exited on its own, --rm already removed the container.
+          if (timedOut || stopped) await this.removeContainer(container);
           if (timedOut) {
             const unit = TIMEOUT_SECONDS === 1 ? 'second' : 'seconds';
             throw new Error(
