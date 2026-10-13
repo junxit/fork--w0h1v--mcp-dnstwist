@@ -106,7 +106,7 @@ class DnstwistServer {
               },
               nameservers: {
                 type: 'string',
-                description: 'Comma-separated list of DNS servers to use (default: 1.1.1.1)',
+                description: 'Comma-separated DNS servers: IPv4 addresses or DNS-over-HTTPS URLs such as https://cloudflare-dns.com/dns-query (default: 1.1.1.1)',
                 default: '1.1.1.1'
               },
               threads: {
