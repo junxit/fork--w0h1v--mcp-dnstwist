@@ -19,6 +19,8 @@ export interface FuzzDomainArgs {
 const HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/i;
 const FORMATS = ['json', 'csv', 'list'] as const;
 const MAX_NAMESERVERS = 10;
+// The DNS-over-HTTPS form dnstwist accepts (dnstwist.py --nameservers parsing).
+const DOH = /^https:\/\/([a-z0-9.-]{4,253})\/dns-query$/;
 
 function invalid(message: string): never {
   throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for fuzz_domain: ${message}`);
@@ -54,12 +56,17 @@ export function validateFuzzArgs(args: unknown): FuzzDomainArgs {
 
   const rawNameservers = a.nameservers === undefined ? '1.1.1.1' : a.nameservers;
   if (typeof rawNameservers !== 'string') invalid('nameservers must be a string');
+  // dnstwist only accepts IPv4 addresses and https://<host>/dns-query URLs, so
+  // anything else would fail inside the container anyway.
   const servers = (rawNameservers as string).split(',').map((ns) => {
     const trimmed = ns.trim();
-    return isIP(trimmed) !== 0 ? trimmed : asciiHostname(trimmed);
+    if (isIP(trimmed) === 4) return trimmed;
+    const doh = trimmed.match(DOH);
+    return doh && HOSTNAME.test(doh[1]) ? trimmed : null;
   });
   if (servers.length > MAX_NAMESERVERS || servers.some((ns) => !ns)) {
-    invalid(`nameservers must be up to ${MAX_NAMESERVERS} comma-separated IP addresses or hostnames`);
+    invalid(`nameservers must be up to ${MAX_NAMESERVERS} comma-separated IPv4 addresses ` +
+      'or DNS-over-HTTPS URLs like https://cloudflare-dns.com/dns-query');
   }
 
   const threads = a.threads === undefined ? 50 : a.threads;

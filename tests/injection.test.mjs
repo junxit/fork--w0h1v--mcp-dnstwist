@@ -94,11 +94,11 @@ test('valid input reaches docker as a separate argv, unchanged', async () => {
   ]);
 });
 
-test('hostname and IPv6 nameservers are accepted', async () => {
-  const result = await call({ domain: 'example.co.uk', nameservers: 'dns.google,2606:4700:4700::1111' });
+test('DoH nameservers reach dnstwist unchanged', async () => {
+  const result = await call({ domain: 'example.co.uk', nameservers: '1.1.1.1,https://cloudflare-dns.com/dns-query' });
   assert.notEqual(result.isError, true, JSON.stringify(result.content));
   assert.deepEqual(runCalls().at(-1).argv.slice(3, 9),
-    ['example.co.uk', '--format', 'json', '--registered', '--nameservers', 'dns.google,2606:4700:4700::1111']);
+    ['example.co.uk', '--format', 'json', '--registered', '--nameservers', '1.1.1.1,https://cloudflare-dns.com/dns-query']);
 });
 
 test('csv and list formats return dnstwist output as text instead of failing', async () => {

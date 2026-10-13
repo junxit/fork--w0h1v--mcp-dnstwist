@@ -23,7 +23,25 @@ test('domains are normalised to lowercase ASCII', () => {
 
 test('nameserver lists are trimmed and rejoined', () => {
   assert.equal(ok({ nameservers: '1.1.1.1, 8.8.8.8' }).nameservers, '1.1.1.1,8.8.8.8');
-  assert.equal(ok({ nameservers: 'dns.google,2606:4700:4700::1111' }).nameservers, 'dns.google,2606:4700:4700::1111');
+});
+
+// dnstwist itself only accepts IPv4 addresses and https://<host>/dns-query.
+test('DNS-over-HTTPS resolvers are accepted in the form dnstwist supports', () => {
+  assert.equal(ok({ nameservers: 'https://cloudflare-dns.com/dns-query' }).nameservers,
+    'https://cloudflare-dns.com/dns-query');
+  assert.equal(ok({ nameservers: '1.1.1.1, https://dns.google/dns-query' }).nameservers,
+    '1.1.1.1,https://dns.google/dns-query');
+});
+
+test('nameservers dnstwist would reject are rejected up front', () => {
+  for (const nameservers of [
+    'dns.google', '2606:4700:4700::1111', '::1', 'http://dns.google/dns-query',
+    'https://dns.google/resolve', 'https://dns.google:443/dns-query', 'https://DNS.google/dns-query',
+    'https://dns.google/dns-query?x=1', 'https://-x/dns-query', 'https://a b/dns-query',
+    'https://$(id)/dns-query', '1.1.1', '256.1.1.1',
+  ]) {
+    rejects({ nameservers });
+  }
 });
 
 test('anything that could reach a shell or become an option is rejected', () => {
@@ -34,7 +52,7 @@ test('anything that could reach a shell or become an option is rejected', () => 
     assert.throws(() => validateFuzzArgs({ domain }), /Invalid arguments/, JSON.stringify(domain));
   }
   for (const nameservers of [
-    '1.1.1.1;id', '1.1.1.1|id', '$(id)', '`id`', '1.1.1.1 --whois', '-x', 'fe80::1%$(id)', '1.1.1.1,,8.8.8.8',
+    '1.1.1.1;id', '1.1.1.1|id', '$(id)', '`id`', '1.1.1.1 --whois', '-x', '1.1.1.1,,8.8.8.8',
     Array(11).fill('1.1.1.1').join(','),
   ]) {
     rejects({ nameservers });
