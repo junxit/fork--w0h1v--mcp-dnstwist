@@ -10,6 +10,7 @@ test('defaults', () => {
   assert.deepEqual(validateFuzzArgs({ domain: 'example.com' }), {
     domain: 'example.com', nameservers: '1.1.1.1', threads: 50, format: 'json',
     registered_only: true, mxcheck: true, ssdeep: false, banners: true,
+    whois: false, all_records: false,
   });
 });
 
@@ -67,4 +68,39 @@ test('threads, format and flags are type-checked', () => {
   rejects({ banners: 'yes' });
   assert.throws(() => validateFuzzArgs(null), /Invalid arguments/);
   assert.equal(ok({ format: 'csv', threads: 100 }).format, 'csv');
+});
+
+test('geoip is not an option', () => {
+  assert.equal('geoip' in ok({ geoip: true }), false);
+});
+
+test('whois and all_records are booleans defaulting to false', () => {
+  for (const key of ['whois', 'all_records']) {
+    assert.equal(ok({ [key]: true })[key], true);
+    assert.equal(ok({})[key], false);
+    for (const bad of ['yes', 1, null, []]) rejects({ [key]: bad });
+  }
+});
+
+test('fuzzers must be a unique list of known names', () => {
+  assert.deepEqual(ok({ fuzzers: ['addition', 'vowel-swap', 'various'] }).fuzzers, ['addition', 'vowel-swap', 'various']);
+  assert.equal(ok({}).fuzzers, undefined);
+  for (const fuzzers of [
+    [], 'addition', ['nope'], ['addition', 'addition'], ['*original'], ['addition,omission'], ['--help'],
+    ['addition', 1], [null], { 0: 'addition' }, ['Addition'], [' addition'],
+    // tld-swap needs a TLD list file, which this tool doesn't take.
+    ['tld-swap'],
+  ]) {
+    rejects({ fuzzers });
+  }
+});
+
+test('lsh is ssdeep or tlsh, and ssdeep: true is a deprecated alias', () => {
+  assert.equal(ok({}).lsh, undefined);
+  assert.equal(ok({ lsh: 'tlsh' }).lsh, 'tlsh');
+  assert.equal(ok({ lsh: 'ssdeep' }).lsh, 'ssdeep');
+  assert.equal(ok({ ssdeep: true }).lsh, 'ssdeep');
+  assert.equal(ok({ ssdeep: false }).lsh, undefined);
+  assert.equal(ok({ ssdeep: true, lsh: 'tlsh' }).lsh, 'tlsh');
+  for (const lsh of ['md5', '--help', 'SSDEEP', true, 1, null]) rejects({ lsh });
 });

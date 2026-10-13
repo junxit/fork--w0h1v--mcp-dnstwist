@@ -32,7 +32,7 @@ before(async () => {
     args: [fileURLToPath(new URL('../build/index.js', import.meta.url))],
     // Run inside the temp dir, so a regression can't drop files in the repo.
     cwd: dir,
-    env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+    env: { ...process.env, DNSTWIST_RUNNER: 'docker', PATH: `${dir}:${process.env.PATH}` },
     stderr: 'ignore',
   });
   client = new Client({ name: 'test', version: '0.0.0' });
@@ -109,6 +109,38 @@ test('csv and list formats return dnstwist output as text instead of failing', a
   assert.notEqual(result.isError, true, JSON.stringify(result.content));
   assert.equal(result.content[0].text, '[]');
   assert.equal(runCalls().at(-1).argv[7], 'csv');
+});
+
+test('new options map to dnstwist flags', async () => {
+  const base = ['example.com', '--format', 'json', '--registered', '--nameservers', '1.1.1.1', '-t', '50', '--mxcheck'];
+  const argvFor = async (args) => {
+    const result = await call({ domain: 'example.com', ...args });
+    assert.notEqual(result.isError, true, JSON.stringify(result.content));
+    return runCalls().at(-1).argv.slice(5);
+  };
+  assert.deepEqual(await argvFor({ whois: true }), [...base, '-b', '-w']);
+  // geoip needs a MaxMind database that isn't available, so it isn't an option.
+  assert.deepEqual(await argvFor({ geoip: true }), [...base, '-b']);
+  assert.deepEqual(await argvFor({ all_records: true }), [...base, '-b', '-a']);
+  assert.deepEqual(await argvFor({ fuzzers: ['addition', 'various'] }), [...base, '-b', '--fuzzers', 'addition,various']);
+  assert.deepEqual(await argvFor({ lsh: 'tlsh' }), [...base, '--lsh', 'tlsh', '-b']);
+  assert.deepEqual(await argvFor({ ssdeep: true }), [...base, '--lsh', 'ssdeep', '-b']);
+  assert.deepEqual(await argvFor({ ssdeep: true, lsh: 'tlsh' }), [...base, '--lsh', 'tlsh', '-b']);
+  assert.deepEqual(await argvFor({ whois: true, all_records: true, banners: false, mxcheck: false, registered_only: false }),
+    ['example.com', '--format', 'json', '--nameservers', '1.1.1.1', '-t', '50', '-w', '-a']);
+  assert.ok(!runCalls().some((c) => c.argv.includes('--ssdeep')), 'the deprecated --ssdeep flag is never passed');
+});
+
+test('bad fuzzers, lsh and flag types never reach docker', async () => {
+  const before = runCalls().length;
+  for (const args of [
+    { fuzzers: ['--help'] }, { fuzzers: ['addition; id'] }, { fuzzers: 'addition' }, { fuzzers: [] },
+    { lsh: '--help' }, { lsh: 'md5' }, { whois: 'true' }, { all_records: 'x' }, { fuzzers: ['tld-swap'] },
+  ]) {
+    const result = await call({ domain: 'example.com', ...args });
+    assert.equal(result.isError, true, JSON.stringify(args));
+  }
+  assert.equal(runCalls().length, before);
 });
 
 // Validation already rejects everything a shell would treat specially, so a

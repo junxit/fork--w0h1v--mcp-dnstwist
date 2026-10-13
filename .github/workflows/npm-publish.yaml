@@ -7,8 +7,13 @@ on:
     # Skip changes that don't alter the published package.
     paths-ignore:
       - '**.md'
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'mkdocs_hooks.py'
+      - 'CITATION.cff'
       - '.github/**'
       - 'Dockerfile'
+      - '.dockerignore'
       - 'smithery.yaml'
 
 permissions:
@@ -27,7 +32,7 @@ jobs:
         with:
           node-version: '24'
       - run: npm ci
-      # The tests run the server against a fake docker; no Docker daemon needed.
+      # The tests run the server against fake docker and dnstwist binaries.
       - run: npm test
 
   publish:
@@ -60,7 +65,19 @@ jobs:
       # Bump locally and push only after npm accepted the package, so a failed
       # publish never leaves a tagged-but-unpublished version behind.
       - name: Bump version
-        run: npm version patch -m "Bump version to %s [skip ci]"
+        run: |
+          # A version set by hand (e.g. a minor release) is published as is;
+          # otherwise bump the patch version.
+          CURRENT=$(node -p "require('./package.json').version")
+          if npm view "@burtthecoder/mcp-dnstwist@$CURRENT" version >/dev/null 2>&1; then
+            npm version patch --no-git-tag-version
+          fi
+          NEW_VERSION=$(node -p "require('./package.json').version")
+          # Keep the MCP Registry manifest in step with the package version.
+          sed -i "s/\"version\": \".*\"/\"version\": \"$NEW_VERSION\"/g" server.json
+          git add package.json package-lock.json server.json
+          git diff --cached --quiet || git commit -m "Bump version to $NEW_VERSION [skip ci]"
+          git tag "v$NEW_VERSION"
 
       - name: Publish to NPM (trusted publishing via OIDC)
         run: npm publish --access public
@@ -69,3 +86,26 @@ jobs:
         run: |
           git push
           git push --tags
+
+      # Keep the MCP Registry listing in step with npm. The registry checks that
+      # the npm package exists, so retry briefly while npm propagates. The
+      # namespace io.github.w0h1v/* is authorized by this repo's OIDC token.
+      - name: Install MCP Publisher
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: Publish to MCP Registry
+        run: |
+          ./mcp-publisher login github-oidc
+          for attempt in 1 2 3 4 5; do
+            if ./mcp-publisher publish; then exit 0; fi
+            echo "Publish attempt $attempt failed; retrying in 30 s (npm may still be propagating)"
+            sleep 30
+          done
+          exit 1
