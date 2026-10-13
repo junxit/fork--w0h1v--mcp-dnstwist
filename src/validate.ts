@@ -62,7 +62,7 @@ export function validateFuzzArgs(args: unknown): FuzzDomainArgs {
     const trimmed = ns.trim();
     if (isIP(trimmed) === 4) return trimmed;
     const doh = trimmed.match(DOH);
-    return doh && HOSTNAME.test(doh[1]) ? trimmed : null;
+    return doh && (isIP(doh[1]) === 4 || HOSTNAME.test(doh[1])) ? trimmed : null;
   });
   if (servers.length > MAX_NAMESERVERS || servers.some((ns) => !ns)) {
     invalid(`nameservers must be up to ${MAX_NAMESERVERS} comma-separated IPv4 addresses ` +

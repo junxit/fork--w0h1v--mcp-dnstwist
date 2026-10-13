@@ -31,6 +31,8 @@ test('DNS-over-HTTPS resolvers are accepted in the form dnstwist supports', () =
     'https://cloudflare-dns.com/dns-query');
   assert.equal(ok({ nameservers: '1.1.1.1, https://dns.google/dns-query' }).nameservers,
     '1.1.1.1,https://dns.google/dns-query');
+  // An IP-literal resolver avoids a bootstrap DNS lookup.
+  assert.equal(ok({ nameservers: 'https://1.1.1.1/dns-query' }).nameservers, 'https://1.1.1.1/dns-query');
 });
 
 test('nameservers dnstwist would reject are rejected up front', () => {
@@ -38,7 +40,7 @@ test('nameservers dnstwist would reject are rejected up front', () => {
     'dns.google', '2606:4700:4700::1111', '::1', 'http://dns.google/dns-query',
     'https://dns.google/resolve', 'https://dns.google:443/dns-query', 'https://DNS.google/dns-query',
     'https://dns.google/dns-query?x=1', 'https://-x/dns-query', 'https://a b/dns-query',
-    'https://$(id)/dns-query', '1.1.1', '256.1.1.1',
+    'https://$(id)/dns-query', 'https://1.1.1/dns-query', 'https://256.1.1.1/dns-query', '1.1.1', '256.1.1.1',
   ]) {
     rejects({ nameservers });
   }
