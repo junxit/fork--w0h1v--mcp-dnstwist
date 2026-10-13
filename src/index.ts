@@ -8,6 +8,7 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { execFile } from 'child_process';
+import { randomUUID } from 'crypto';
 import { promisify } from 'util';
 import { validateFuzzArgs } from './validate.js';
 
@@ -15,6 +16,23 @@ import { validateFuzzArgs } from './validate.js';
 // so tool input can never be interpreted as shell syntax (CWE-78, issue #13).
 const execFileAsync = promisify(execFile);
 const DOCKER_IMAGE = 'elceef/dnstwist';
+
+// A scan that runs longer than this is stopped and its container removed.
+// Slow resolvers (DNS-over-HTTPS) and --ssdeep/--banners can take many minutes.
+const DEFAULT_TIMEOUT_SECONDS = 600;
+
+function scanTimeoutSeconds(): number {
+  const raw = process.env.DNSTWIST_TIMEOUT_SECONDS;
+  if (raw === undefined || raw === '') return DEFAULT_TIMEOUT_SECONDS;
+  const seconds = Number(raw);
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 86400) {
+    console.error(`DNSTWIST_TIMEOUT_SECONDS must be an integer from 1 to 86400, got ${JSON.stringify(raw)}`);
+    process.exit(1);
+  }
+  return seconds;
+}
+
+const TIMEOUT_SECONDS = scanTimeoutSeconds();
 
 interface DnstwistResult {
   banner_http?: string;
@@ -40,10 +58,14 @@ class DnstwistServer {
     this.setupToolHandlers();
     
     this.server.onerror = (error) => console.error('[MCP Error]', error);
-    process.on('SIGINT', async () => {
-      await this.server.close();
-      process.exit(0);
-    });
+    for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+      process.on(signal, async () => {
+        // Don't leave scans running after the server is gone.
+        await Promise.all([...this.runningContainers].map((name) => this.removeContainer(name)));
+        await this.server.close();
+        process.exit(0);
+      });
+    }
 
     // Trigger setup immediately
     this.ensureSetup().catch(error => {
@@ -52,11 +74,16 @@ class DnstwistServer {
     });
   }
 
-  private async execCommand(file: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  private async execCommand(
+    file: string,
+    args: string[],
+    options: { timeout?: number; signal?: AbortSignal } = {}
+  ): Promise<{ stdout: string; stderr: string }> {
     console.error('Executing:', file, JSON.stringify(args));
     try {
       const result = await execFileAsync(file, args, {
-        maxBuffer: 10 * 1024 * 1024
+        maxBuffer: 10 * 1024 * 1024,
+        ...options
       });
       console.error('Command output:', result.stdout);
       if (result.stderr) console.error('Command stderr:', result.stderr);
@@ -64,6 +91,20 @@ class DnstwistServer {
     } catch (error) {
       console.error('Command failed:', error);
       throw error;
+    }
+  }
+
+  // Containers of scans in progress, removed if the server shuts down.
+  private runningContainers = new Set<string>();
+
+  // Killing the docker CLI doesn't stop the container it started, so a scan
+  // that times out or is cancelled is removed by name. Best effort: the
+  // container may already be gone.
+  private async removeContainer(name: string): Promise<void> {
+    try {
+      await execFileAsync('docker', ['rm', '-f', name]);
+    } catch {
+      // Nothing to remove.
     }
   }
 
@@ -149,7 +190,7 @@ class DnstwistServer {
       ]
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       try {
         await this.ensureSetup();
 
@@ -185,9 +226,29 @@ class DnstwistServer {
         if (banners) args.push('-b');
 
         // Run dnstwist in Docker
-        const { stdout } = await this.execCommand(
-          'docker', ['run', '--rm', DOCKER_IMAGE, ...args]
-        );
+        const container = `mcp-dnstwist-${randomUUID()}`;
+        this.runningContainers.add(container);
+        let stdout: string;
+        try {
+          ({ stdout } = await this.execCommand(
+            'docker', ['run', '--rm', '--name', container, DOCKER_IMAGE, ...args],
+            { timeout: TIMEOUT_SECONDS * 1000, signal: extra.signal }
+          ));
+        } catch (error) {
+          await this.removeContainer(container);
+          const timedOut = (error as { killed?: boolean }).killed && !extra.signal.aborted;
+          if (timedOut) {
+            const unit = TIMEOUT_SECONDS === 1 ? 'second' : 'seconds';
+            throw new Error(
+              `dnstwist did not finish within ${TIMEOUT_SECONDS} ${unit} and was stopped. ` +
+              'Use an IPv4 nameserver (DNS-over-HTTPS is slow), turn off ssdeep or banners, ' +
+              'or raise DNSTWIST_TIMEOUT_SECONDS.'
+            );
+          }
+          throw error;
+        } finally {
+          this.runningContainers.delete(container);
+        }
 
         // csv and list output are returned as dnstwist printed them.
         if (format !== 'json') {
