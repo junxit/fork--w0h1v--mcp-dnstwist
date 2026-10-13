@@ -17,7 +17,7 @@ This tool is designed for legitimate security research purposes. Please:
 
 ## Requirements
 
-- Node.js (v20 or later)
+- Node.js (v20.3 or later)
 - Docker
 - macOS, Linux, or Windows with Docker Desktop installed
 
@@ -121,6 +121,14 @@ Example:
 }
 ```
 
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `DNSTWIST_TIMEOUT_SECONDS` | `600` | Longest a scan may run. When it's reached, or when the client cancels the call, the scan's container is stopped and removed. |
+
+Set it in your client's `env` block, for example `"env": { "DNSTWIST_TIMEOUT_SECONDS": "900" }`.
+
 ## Troubleshooting
 
 ### Docker Issues
@@ -152,6 +160,8 @@ docker ps
    - Restart Claude Desktop
 
 ## Error Messages
+
+- "dnstwist did not finish within N seconds": the scan hit `DNSTWIST_TIMEOUT_SECONDS`. Use an IPv4 nameserver (DNS-over-HTTPS is slow), turn off `ssdeep` or `banners`, or raise the limit
 
 - "Docker is not installed or not running": Install Docker and start the Docker daemon
 - "Failed to parse dnstwist output": Check if the domain is valid and the format is correct

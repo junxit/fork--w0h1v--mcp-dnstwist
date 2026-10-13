@@ -87,8 +87,11 @@ test('threads must be an integer from 1 to 100', async () => {
 test('valid input reaches docker as a separate argv, unchanged', async () => {
   const result = await call({ domain: 'example.com', nameservers: '1.1.1.1,8.8.8.8', threads: 10 });
   assert.notEqual(result.isError, true, JSON.stringify(result.content));
-  assert.deepEqual(runCalls().at(-1).argv, [
-    'run', '--rm', 'elceef/dnstwist', 'example.com',
+  const { argv } = runCalls().at(-1);
+  assert.deepEqual(argv.slice(0, 3), ['run', '--rm', '--name']);
+  assert.match(argv[3], /^mcp-dnstwist-[0-9a-f-]{36}$/);
+  assert.deepEqual(argv.slice(4), [
+    'elceef/dnstwist', 'example.com',
     '--format', 'json', '--registered', '--nameservers', '1.1.1.1,8.8.8.8',
     '-t', '10', '--mxcheck', '-b',
   ]);
@@ -97,7 +100,7 @@ test('valid input reaches docker as a separate argv, unchanged', async () => {
 test('DoH nameservers reach dnstwist unchanged', async () => {
   const result = await call({ domain: 'example.co.uk', nameservers: '1.1.1.1,https://cloudflare-dns.com/dns-query' });
   assert.notEqual(result.isError, true, JSON.stringify(result.content));
-  assert.deepEqual(runCalls().at(-1).argv.slice(3, 9),
+  assert.deepEqual(runCalls().at(-1).argv.slice(5, 11),
     ['example.co.uk', '--format', 'json', '--registered', '--nameservers', '1.1.1.1,https://cloudflare-dns.com/dns-query']);
 });
 
@@ -105,7 +108,7 @@ test('csv and list formats return dnstwist output as text instead of failing', a
   const result = await call({ domain: 'example.com', format: 'csv' });
   assert.notEqual(result.isError, true, JSON.stringify(result.content));
   assert.equal(result.content[0].text, '[]');
-  assert.equal(runCalls().at(-1).argv[5], 'csv');
+  assert.equal(runCalls().at(-1).argv[7], 'csv');
 });
 
 // Validation already rejects everything a shell would treat specially, so a
