@@ -10,15 +10,15 @@ import {
 import { execFile } from 'child_process';
 import { randomUUID } from 'crypto';
 import { promisify } from 'util';
-import { validateFuzzArgs } from './validate.js';
+import { FUZZERS, LSH_ALGORITHMS, validateFuzzArgs } from './validate.js';
 
-// execFile runs docker directly with an argument array. No shell is involved,
+// execFile runs docker (or dnstwist) directly with an argument array. No shell is involved,
 // so tool input can never be interpreted as shell syntax (CWE-78, issue #13).
 const execFileAsync = promisify(execFile);
 const DOCKER_IMAGE = 'elceef/dnstwist';
 
 // A scan that runs longer than this is stopped and its container removed.
-// Slow resolvers (DNS-over-HTTPS) and --ssdeep/--banners can take many minutes.
+// Slow resolvers (DNS-over-HTTPS), LSH and banners can take many minutes.
 const DEFAULT_TIMEOUT_SECONDS = 600;
 
 function scanTimeoutSeconds(): number {
@@ -34,6 +34,23 @@ function scanTimeoutSeconds(): number {
 
 const TIMEOUT_SECONDS = scanTimeoutSeconds();
 
+type Runner = 'docker' | 'local';
+const RUNNER_SETTINGS = ['docker', 'local', 'auto'] as const;
+
+// docker: run the elceef/dnstwist image. local: run a dnstwist on PATH.
+// auto (default): local when a dnstwist executable works, otherwise docker.
+function runnerSetting(): (typeof RUNNER_SETTINGS)[number] {
+  const raw = process.env.DNSTWIST_RUNNER;
+  if (raw === undefined || raw === '') return 'auto';
+  if (!(RUNNER_SETTINGS as readonly string[]).includes(raw)) {
+    console.error(`DNSTWIST_RUNNER must be one of ${RUNNER_SETTINGS.join(', ')}, got ${JSON.stringify(raw)}`);
+    process.exit(1);
+  }
+  return raw as (typeof RUNNER_SETTINGS)[number];
+}
+
+const RUNNER_SETTING = runnerSetting();
+
 interface DnstwistResult {
   banner_http?: string;
   dns_a?: string[];
@@ -42,6 +59,7 @@ interface DnstwistResult {
   dns_ns?: string[];
   domain: string;
   fuzzer: string;
+  geoip?: string;
   whois_created?: string;
   whois_registrar?: string;
 }
@@ -61,9 +79,10 @@ class DnstwistServer {
     for (const signal of ['SIGINT', 'SIGTERM'] as const) {
       process.on(signal, async () => {
         // Don't leave scans running after the server is gone: stop each
-        // in-flight docker run first, then remove its container.
-        for (const controller of this.runningContainers.values()) controller.abort();
-        await Promise.all([...this.runningContainers.keys()].map((name) => this.removeContainer(name)));
+        // in-flight child process first, then remove any docker container.
+        const scans = [...this.runningScans.values()];
+        for (const scan of scans) scan.stop.abort();
+        await Promise.all(scans.flatMap((scan) => (scan.container ? [this.removeContainer(scan.container)] : [])));
         await this.server.close();
         process.exit(0);
       });
@@ -79,14 +98,29 @@ class DnstwistServer {
   private async execCommand(
     file: string,
     args: string[],
-    options: { timeout?: number; signal?: AbortSignal } = {}
+    options: { timeout?: number; signal?: AbortSignal; killSignal?: NodeJS.Signals; killOnAbort?: boolean } = {}
   ): Promise<{ stdout: string; stderr: string }> {
     console.error('Executing:', file, JSON.stringify(args));
     try {
-      const result = await execFileAsync(file, args, {
+      const { killOnAbort, ...execOptions } = options;
+      const pending = execFileAsync(file, args, {
         maxBuffer: 10 * 1024 * 1024,
-        ...options
+        ...execOptions,
+        // execFile's own `signal` support always sends SIGTERM; when the process
+        // must be killed outright, handle the abort here instead.
+        ...(killOnAbort ? { signal: undefined } : {})
       });
+      const abort = () => pending.child.kill('SIGKILL');
+      if (killOnAbort && options.signal) {
+        if (options.signal.aborted) abort();
+        else options.signal.addEventListener('abort', abort, { once: true });
+      }
+      let result;
+      try {
+        result = await pending;
+      } finally {
+        options.signal?.removeEventListener('abort', abort);
+      }
       console.error('Command output:', result.stdout);
       if (result.stderr) console.error('Command stderr:', result.stderr);
       return result;
@@ -96,8 +130,9 @@ class DnstwistServer {
     }
   }
 
-  // Scans in progress: container name -> controller that stops its docker run.
-  private runningContainers = new Map<string, AbortController>();
+  // Scans in progress: id -> controller that stops the child process, plus the
+  // container name when the docker runner started one.
+  private runningScans = new Map<string, { stop: AbortController; container?: string }>();
 
   // Killing the docker CLI doesn't stop the container it started, so a scan
   // that times out or is cancelled is removed by name. Right after the CLI
@@ -115,24 +150,70 @@ class DnstwistServer {
     console.error(`Could not confirm removal of container ${name}`);
   }
 
-  private async ensureSetup(): Promise<void> {
-    try {
-      console.error('Checking Docker...');
-      try {
-        await this.execCommand('docker', ['--version']);
-      } catch (error) {
-        throw new Error('Docker is not installed or not running. Please install Docker and try again.');
-      }
+  private runnerPromise?: Promise<Runner>;
 
-      console.error('Checking if dnstwist image exists...');
-      try {
-        await this.execCommand('docker', ['image', 'inspect', DOCKER_IMAGE]);
-        console.error('Dnstwist image found');
-      } catch (error) {
-        console.error('Dnstwist image not found, pulling...');
-        await this.execCommand('docker', ['pull', DOCKER_IMAGE]);
-        console.error('Dnstwist image pulled successfully');
-      }
+  // Decided once. A failed check is not cached, so a later call can retry.
+  private getRunner(): Promise<Runner> {
+    this.runnerPromise ??= this.selectRunner().catch((error) => {
+      this.runnerPromise = undefined;
+      throw error;
+    });
+    return this.runnerPromise;
+  }
+
+  private async checkLocal(): Promise<void> {
+    try {
+      await this.execCommand('dnstwist', ['--version']);
+    } catch (error) {
+      throw new Error(
+        'The dnstwist executable was not found or does not work (`dnstwist --version` failed). ' +
+        'Install it (for example `pipx install "dnstwist[full]"`) or set DNSTWIST_RUNNER=docker.'
+      );
+    }
+  }
+
+  private async selectRunner(): Promise<Runner> {
+    if (RUNNER_SETTING === 'docker') return 'docker';
+    if (RUNNER_SETTING === 'local') {
+      await this.checkLocal();
+      console.error('Using the local dnstwist executable (DNSTWIST_RUNNER=local)');
+      return 'local';
+    }
+    try {
+      await this.checkLocal();
+      console.error('Using the local dnstwist executable (DNSTWIST_RUNNER=auto)');
+      return 'local';
+    } catch {
+      console.error('No working dnstwist executable on PATH; using Docker (DNSTWIST_RUNNER=auto)');
+      return 'docker';
+    }
+  }
+
+  private async checkDocker(): Promise<void> {
+    console.error('Checking Docker...');
+    try {
+      await this.execCommand('docker', ['--version']);
+    } catch (error) {
+      throw new Error('Docker is not installed or not running. Please install Docker and try again.');
+    }
+
+    console.error('Checking if dnstwist image exists...');
+    try {
+      await this.execCommand('docker', ['image', 'inspect', DOCKER_IMAGE]);
+      console.error('Dnstwist image found');
+    } catch (error) {
+      console.error('Dnstwist image not found, pulling...');
+      await this.execCommand('docker', ['pull', DOCKER_IMAGE]);
+      console.error('Dnstwist image pulled successfully');
+    }
+  }
+
+  private async ensureSetup(): Promise<Runner> {
+    try {
+      const runner = await this.getRunner();
+      // Docker is re-checked per call: the image or daemon can disappear.
+      if (runner === 'docker') await this.checkDocker();
+      return runner;
     } catch (error) {
       console.error('Setup failed:', error);
       throw error;
@@ -159,7 +240,7 @@ class DnstwistServer {
               },
               threads: {
                 type: 'number',
-                description: 'Number of threads to use for parallel processing',
+                description: 'Number of parallel lookups (1-100)',
                 minimum: 1,
                 maximum: 100,
                 default: 50
@@ -177,17 +258,40 @@ class DnstwistServer {
               },
               mxcheck: {
                 type: 'boolean',
-                description: 'Check for MX records',
+                description: 'Check whether each mail server would accept email for any address, so it could intercept mail sent to typos of your domain',
                 default: true
               },
               ssdeep: {
                 type: 'boolean',
-                description: 'Generate fuzzy hashes of web pages to detect phishing',
+                description: 'Deprecated alias for lsh: "ssdeep" (ignored when lsh is set)',
                 default: false
+              },
+              lsh: {
+                type: 'string',
+                enum: [...LSH_ALGORITHMS],
+                description: 'Compare each permutation\'s web page with the original using a fuzzy hash (slow) to spot cloned phishing pages'
+              },
+              whois: {
+                type: 'boolean',
+                description: 'Look up WHOIS creation date and registrar for each domain (slower)',
+                default: false
+              },
+              all_records: {
+                type: 'boolean',
+                description: 'Return all DNS records instead of only the first of each type',
+                default: false
+              },
+              fuzzers: {
+                type: 'array',
+                items: { type: 'string', enum: [...FUZZERS] },
+                minItems: 1,
+                maxItems: FUZZERS.length,
+                uniqueItems: true,
+                description: 'Only use these fuzzing algorithms (default: all)'
               },
               banners: {
                 type: 'boolean',
-                description: 'Capture HTTP banner information',
+                description: 'Capture HTTP and SMTP server banners',
                 default: true
               }
             },
@@ -199,7 +303,7 @@ class DnstwistServer {
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       try {
-        await this.ensureSetup();
+        const runner = await this.ensureSetup();
 
         if (request.params.name !== 'fuzz_domain') {
           throw new McpError(
@@ -215,8 +319,11 @@ class DnstwistServer {
           format,
           registered_only,
           mxcheck,
-          ssdeep,
-          banners
+          banners,
+          whois,
+          all_records,
+          fuzzers,
+          lsh
         } = validateFuzzArgs(request.params.arguments);
 
         // Build command arguments
@@ -229,35 +336,39 @@ class DnstwistServer {
         if (nameservers) args.push('--nameservers', nameservers);
         if (threads) args.push('-t', threads.toString());
         if (mxcheck) args.push('--mxcheck');
-        if (ssdeep) args.push('--ssdeep');
+        if (lsh) args.push('--lsh', lsh);
         if (banners) args.push('-b');
+        if (whois) args.push('-w');
+        if (all_records) args.push('-a');
+        if (fuzzers) args.push('--fuzzers', fuzzers.join(','));
 
-        // Run dnstwist in Docker
-        const container = `mcp-dnstwist-${randomUUID()}`;
+        const id = randomUUID();
+        const container = runner === 'docker' ? `mcp-dnstwist-${id}` : undefined;
         const stop = new AbortController();
-        this.runningContainers.set(container, stop);
+        this.runningScans.set(id, { stop, container });
         let stdout: string;
         try {
-          ({ stdout } = await this.execCommand(
-            'docker', ['run', '--rm', '--name', container, DOCKER_IMAGE, ...args],
-            { timeout: TIMEOUT_SECONDS * 1000, signal: AbortSignal.any([extra.signal, stop.signal]) }
-          ));
+          const options = { timeout: TIMEOUT_SECONDS * 1000, signal: AbortSignal.any([extra.signal, stop.signal]) };
+          ({ stdout } = container
+            ? await this.execCommand('docker', ['run', '--rm', '--name', container, DOCKER_IMAGE, ...args], options)
+            // dnstwist handles SIGTERM itself and may wind down slowly: kill it outright.
+            : await this.execCommand('dnstwist', args, { ...options, killSignal: 'SIGKILL', killOnAbort: true }));
         } catch (error) {
           const stopped = extra.signal.aborted || stop.signal.aborted;
           const timedOut = Boolean((error as { killed?: boolean }).killed) && !stopped;
           // If dnstwist exited on its own, --rm already removed the container.
-          if (timedOut || stopped) await this.removeContainer(container);
+          if (container && (timedOut || stopped)) await this.removeContainer(container);
           if (timedOut) {
             const unit = TIMEOUT_SECONDS === 1 ? 'second' : 'seconds';
             throw new Error(
               `dnstwist did not finish within ${TIMEOUT_SECONDS} ${unit} and was stopped. ` +
-              'Use an IPv4 nameserver (DNS-over-HTTPS is slow), turn off ssdeep or banners, ' +
+              'Use an IPv4 nameserver (DNS-over-HTTPS is slow), turn off lsh, whois or banners, ' +
               'or raise DNSTWIST_TIMEOUT_SECONDS.'
             );
           }
           throw error;
         } finally {
-          this.runningContainers.delete(container);
+          this.runningScans.delete(id);
         }
 
         // csv and list output are returned as dnstwist printed them.

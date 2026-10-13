@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/w0h1v/mcp-dnstwist/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue for them.
+  - name: Problem with dnstwist itself
+    url: https://github.com/elceef/dnstwist/issues
+    about: Permutation algorithms, DNS lookups and dnstwist output belong to the dnstwist project. This server only runs dnstwist.

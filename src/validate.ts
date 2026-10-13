@@ -11,6 +11,12 @@ export interface FuzzDomainArgs {
   mxcheck: boolean;
   ssdeep: boolean;
   banners: boolean;
+  whois: boolean;
+  all_records: boolean;
+  /** Only present when the caller selected fuzzers. */
+  fuzzers?: string[];
+  /** Resolved LSH algorithm; present when `lsh` was given or `ssdeep` is true. */
+  lsh?: 'ssdeep' | 'tlsh';
 }
 
 // A hostname: dot-separated labels of letters, digits and inner hyphens, ending
@@ -18,6 +24,13 @@ export interface FuzzDomainArgs {
 // mistaken for a dnstwist option either.
 const HOSTNAME = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/i;
 const FORMATS = ['json', 'csv', 'list'] as const;
+// dnstwist's fuzzing algorithms, minus dictionary and tld-swap: those need a
+// word or TLD list file, which this tool doesn't take.
+export const FUZZERS = [
+  'addition', 'bitsquatting', 'cyrillic', 'homoglyph', 'hyphenation', 'insertion', 'omission',
+  'plural', 'repetition', 'replacement', 'subdomain', 'transposition', 'vowel-swap', 'various',
+] as const;
+export const LSH_ALGORITHMS = ['ssdeep', 'tlsh'] as const;
 const MAX_NAMESERVERS = 10;
 // The DNS-over-HTTPS form dnstwist accepts (dnstwist.py --nameservers parsing).
 const DOH = /^https:\/\/([a-z0-9.-]{4,253})\/dns-query$/;
@@ -79,6 +92,24 @@ export function validateFuzzArgs(args: unknown): FuzzDomainArgs {
     invalid(`format must be one of ${FORMATS.join(', ')}`);
   }
 
+  let fuzzers: string[] | undefined;
+  if (a.fuzzers !== undefined) {
+    const list = a.fuzzers;
+    if (!Array.isArray(list) || list.length < 1 || list.length > FUZZERS.length ||
+        list.some((f) => typeof f !== 'string' || !(FUZZERS as readonly string[]).includes(f)) ||
+        new Set(list).size !== list.length) {
+      invalid(`fuzzers must be 1 to ${FUZZERS.length} unique names from: ${FUZZERS.join(', ')}`);
+    }
+    fuzzers = list as string[];
+  }
+
+  if (a.lsh !== undefined && !LSH_ALGORITHMS.includes(a.lsh as (typeof LSH_ALGORITHMS)[number])) {
+    invalid(`lsh must be one of ${LSH_ALGORITHMS.join(', ')}`);
+  }
+  const ssdeep = optionalBoolean(a, 'ssdeep', false);
+  // `ssdeep: true` is the older spelling of `lsh: 'ssdeep'`; an explicit lsh wins.
+  const lsh = (a.lsh as 'ssdeep' | 'tlsh' | undefined) ?? (ssdeep ? 'ssdeep' : undefined);
+
   return {
     domain: domain as string,
     nameservers: servers.join(','),
@@ -86,7 +117,11 @@ export function validateFuzzArgs(args: unknown): FuzzDomainArgs {
     format: format as (typeof FORMATS)[number],
     registered_only: optionalBoolean(a, 'registered_only', true),
     mxcheck: optionalBoolean(a, 'mxcheck', true),
-    ssdeep: optionalBoolean(a, 'ssdeep', false),
+    ssdeep,
     banners: optionalBoolean(a, 'banners', true),
+    whois: optionalBoolean(a, 'whois', false),
+    all_records: optionalBoolean(a, 'all_records', false),
+    ...(fuzzers ? { fuzzers } : {}),
+    ...(lsh ? { lsh } : {}),
   };
 }

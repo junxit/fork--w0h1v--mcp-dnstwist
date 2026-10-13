@@ -47,7 +47,7 @@ before(async () => {
     command: process.execPath,
     args: [fileURLToPath(new URL('../build/index.js', import.meta.url))],
     cwd: dir,
-    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, DNSTWIST_TIMEOUT_SECONDS: '1' },
+    env: { ...process.env, DNSTWIST_RUNNER: 'docker', PATH: `${dir}:${process.env.PATH}`, DNSTWIST_TIMEOUT_SECONDS: '1' },
     stderr: 'ignore',
   });
   client = new Client({ name: 'test', version: '0.0.0' });

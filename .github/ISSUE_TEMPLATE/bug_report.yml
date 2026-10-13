@@ -1,0 +1,47 @@
+name: Bug report
+description: Report a defect in mcp-dnstwist
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Only scan domains you own or are authorized to assess, and don't paste results for domains from private investigations. Use example.com in reproductions where you can.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Include the exact error text.
+    validations:
+      required: true
+
+  - type: textarea
+    id: input
+    attributes:
+      label: Tool call
+      description: 'The arguments you used, for example {"domain": "example.com", "whois": true}.'
+      render: json
+
+  - type: input
+    id: version
+    attributes:
+      label: mcp-dnstwist version
+      description: Output of `npm ls -g @burtthecoder/mcp-dnstwist`, or the commit you built from.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runner
+    attributes:
+      label: How dnstwist runs
+      options: [Docker (elceef/dnstwist image), Local dnstwist install, The mcp-dnstwist Docker image, Not sure]
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Node version, OS and MCP client
+      description: For example, Node 22.11 on macOS 15 arm64 with Claude Desktop.
+    validations:
+      required: true

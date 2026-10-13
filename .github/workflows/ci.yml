@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches-ignore: ["dependabot/**"]
-    paths-ignore: ["**/*.md"]
+    paths-ignore: ["docs/**", "mkdocs.yml", "mkdocs_hooks.py", "CITATION.cff", "**/*.md"]
   pull_request:
 
 permissions:
@@ -31,5 +31,20 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm ci
       - run: npm test
+      - name: Check the package contents
+        run: npm pack --dry-run
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: docker build -t mcp-dnstwist .
+      - name: Check dnstwist runs in the image as a non-root user
+        run: |
+          docker run --rm --entrypoint sh mcp-dnstwist -c 'test "$(id -u)" != 0 && dnstwist --version'
