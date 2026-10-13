@@ -100,7 +100,7 @@ npm run build
 - Description: Generate and analyze domain permutations to detect potential typosquatting, phishing, and brand impersonation
 - Parameters:
   * `domain` (required): Domain name to analyze (e.g., example.com)
-  * `nameservers` (optional, default: "1.1.1.1"): Comma-separated DNS servers, up to 10. Each must be an IPv4 address or a DNS-over-HTTPS URL such as `https://cloudflare-dns.com/dns-query` (the forms dnstwist accepts)
+  * `nameservers` (optional, default: "1.1.1.1"): Comma-separated DNS servers, up to 10. Each must be an IPv4 address or a DNS-over-HTTPS URL such as `https://cloudflare-dns.com/dns-query` (the forms dnstwist accepts). DNS-over-HTTPS is much slower: a DoH-only scan can take over 10 minutes, so include an IPv4 resolver unless you need DoH
   * `threads` (optional, default: 50): Number of threads for parallel processing (1-100)
   * `format` (optional, default: "json"): Output format (json, csv, list)
   * `registered_only` (optional, default: true): Show only registered domains
